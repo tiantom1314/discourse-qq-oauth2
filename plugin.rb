@@ -76,4 +76,41 @@ class OmniAuth::Strategies::QQConnect < OmniAuth::Strategies::OAuth2
   def raw_info
     @raw_info ||= begin
       access_token.options[:mode] = :query
-      access_token.options[:param_name] = 'acces
+      access_token.options[:param_name] = 'access_token'
+
+      openid_response = access_token.get('/oauth2.0/me').body
+      openid_json = openid_response[/\{.*\}/]
+      openid_data = JSON.parse(openid_json)
+      openid = openid_data['openid']
+
+      user_info = access_token.get('/user/get_user_info', params: { oauth_consumer_key: client.id, openid: openid }).parsed
+      user_info['id'] = openid
+      user_info
+    end
+  end
+end
+
+# 注册设置
+SiteSetting.add_setting :qq_connect_enabled, type: :boolean, default: false
+SiteSetting.add_setting :qq_connect_client_id, type: :string, default: ''
+SiteSetting.add_setting :qq_connect_client_secret, type: :string, default: '', secret: true
+
+add_to_serializer(:site, :qq_connect_enabled) { SiteSetting.qq_connect_enabled }
+add_to_serializer(:site, :qq_connect_client_id) { SiteSetting.qq_connect_client_id }
+add_to_serializer(:site, :qq_connect_client_secret) { SiteSetting.qq_connect_client_secret }
+
+# 注册认证提供者
+auth_provider title: 'with QQ',
+              enabled_setting: 'qq_connect_enabled',
+              frame_width: 760,
+              frame_height: 500,
+              authenticator: QQAuthenticator.new,
+              background_color: '#51b7ec'
+
+# 添加样式
+register_css <<CSS
+.btn-social.qq_connect:before {
+  font-family: "Font Awesome 5 Free";
+  content: "\\f3ce";
+}
+CSS
