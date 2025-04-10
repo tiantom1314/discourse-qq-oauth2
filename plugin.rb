@@ -1,7 +1,7 @@
-# name: QQ connect
-# about: Authenticate with discourse with qq connect.
-# version: 0.2.0
-# author: Erick Guan, Updated by [Your Name]
+# name: discourse-qq-oauth2
+# about: Authenticate with Discourse using QQ OAuth2
+# version: 0.1
+# authors: tiantom1314
 
 require 'omniauth-oauth2'
 
@@ -76,11 +76,4 @@ class OmniAuth::Strategies::QQConnect < OmniAuth::Strategies::OAuth2
   def raw_info
     @raw_info ||= begin
       access_token.options[:mode] = :query
-      access_token.options[:param_name] = 'access_token'
-
-      openid_response = access_token.get('/oauth2.0/me').body
-      openid_json = openid_response[/\{.*\}/]
-      openid_data = JSON.parse(openid_json)
-      openid = openid_data['openid']
-
-      user_info = access_toke
+      access_token.options[:param_name] = 'acces
