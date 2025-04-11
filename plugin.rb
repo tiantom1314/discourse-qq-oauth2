@@ -1,50 +1,47 @@
-# plugin.rb
+# name: discourse-qq-oauth2
+# about: Authenticate with Discourse using QQ OAuth2
+# version: 0.2
+# authors: tiantom1314, Grok (xAI)
+# url: https://github.com/tiantom1314/discourse-qq-oauth2
+
 require 'omniauth-oauth2'
 
+# 定义 QQ 认证器
 class QQAuthenticator < ::Auth::Authenticator
-  PLUGIN_NAME = 'qq_connect'.freeze
-  QQ_PROVIDER = 'qq_connect'.freeze
-
   def name
-    QQ_PROVIDER
-  end
-
-  def enabled?
-    SiteSetting.qq_connect_enabled # 添加启用/禁用开关
+    'qq_connect'
   end
 
   def after_authenticate(auth_token)
     result = Auth::Result.new
 
-    # 提取认证数据
-    uid = auth_token[:uid]
-    info = auth_token[:info] || {}
-    extra = auth_token[:extra] || {}
+    data = auth_token[:info]
+    raw_info = auth_token[:extra][:raw_info]
+    name = data['nickname']
+    username = data['name']
+    qq_uid = auth_token[:uid]
 
-    # 设置用户信息
-    result.name = info['nickname'] || "QQUser_#{uid}"
-    result.username = generate_username(info['name'], uid)
-    result.email = info['email'] if info['email'] # QQ API 可能返回邮箱
-    result.email_valid = false # 默认不信任第三方邮箱
+    # 检查是否已有用户绑定了这个 QQ UID
+    current_info = ::PluginStore.get('qq', "qq_uid_#{qq_uid}")
 
-    # 检查现有用户
-    current_info = PluginStore.get(PLUGIN_NAME, "qq_#{uid}")
-    result.user = User.find_by(id: current_info[:user_id]) if current_info
+    result.user =
+      if current_info
+        User.where(id: current_info[:user_id]).first
+      end
 
-    # 存储额外数据
-    result.extra_data = { qq_uid: uid, raw_info: extra[:raw_info] }
+    result.name = name
+    result.username = username
+    # QQ 登录不返回邮箱，生成一个虚拟邮箱，后续需要用户手动填写
+    result.email = "qq_#{qq_uid}@example.com"
+    result.email_valid = false # 强制用户验证邮箱
+    result.extra_data = { qq_uid: qq_uid, raw_info: raw_info }
 
-    result
-  rescue StandardError => e
-    Rails.logger.error("QQ Auth Error: #{e.message}")
-    result.failed = true
-    result.failed_reason = "Authentication failed: #{e.message}"
     result
   end
 
   def after_create_account(user, auth)
-    uid = auth[:uid]
-    PluginStore.set(PLUGIN_NAME, "qq_#{uid}", { user_id: user.id })
+    qq_uid = auth[:extra_data][:qq_uid]
+    ::PluginStore.set('qq', "qq_uid_#{qq_uid}", { user_id: user.id })
   end
 
   def register_middleware(omniauth)
@@ -53,38 +50,77 @@ class QQAuthenticator < ::Auth::Authenticator
                         strategy = env['omniauth.strategy']
                         strategy.options[:client_id] = SiteSetting.qq_connect_client_id
                         strategy.options[:client_secret] = SiteSetting.qq_connect_client_secret
-                        strategy.options[:authorize_url] = 'https://graph.qq.com/oauth2.0/authorize'
-                        strategy.options[:token_url] = 'https://graph.qq.com/oauth2.0/token'
-                        strategy.options[:scope] = 'get_user_info' # 根据需要调整
+                        strategy.options[:client_options] = {
+                          site: 'https://graph.qq.com',
+                          authorize_url: '/oauth2.0/authorize',
+                          token_url: '/oauth2.0/token'
+                        }
+                        strategy.options[:token_params] = { parse: :query }
+                        strategy.options[:authorize_params] = { scope: 'get_user_info' }
                       }
-  end
-
-  private
-
-  def generate_username(name, uid)
-    base = name&.parameterize || "qq_#{uid}"
-    UserNameSuggester.suggest(base) # 使用 Discourse 的用户名生成工具
   end
 end
 
-# 配置认证提供者
-auth_provider title: 'Login with QQ',
-              authenticator: QQAuthenticator.new,
+# 自定义 OAuth2 策略
+class OmniAuth::Strategies::QQConnect < OmniAuth::Strategies::OAuth2
+  option :name, 'qq_connect'
+
+  uid { raw_info['id'] }
+
+  info do
+    {
+      name: raw_info['nickname'],
+      username: raw_info['nickname'],
+      image: raw_info['figureurl_qq_2']
+    }
+  end
+
+  extra do
+    { raw_info: raw_info }
+  end
+
+  def raw_info
+    @raw_info ||= begin
+      access_token.options[:mode] = :query
+      access_token.options[:param_name] = 'access_token'
+
+      # 获取 openid
+      openid_response = access_token.get('/oauth2.0/me').body
+      openid_json = openid_response[/\{.*\}/]
+      openid_data = JSON.parse(openid_json)
+      openid = openid_data['openid']
+
+      # 获取用户信息
+      user_info = access_token.get('/user/get_user_info', params: { oauth_consumer_key: client.id, openid: openid }).parsed
+      user_info['id'] = openid
+      user_info
+    end
+  end
+end
+
+# 注册设置项
+enabled_site_setting :qq_connect_enabled
+
+SiteSetting.add_setting :qq_connect_enabled, type: :boolean, default: false
+SiteSetting.add_setting :qq_connect_client_id, type: :string, default: ''
+SiteSetting.add_setting :qq_connect_client_secret, type: :string, default: '', secret: true
+
+add_to_serializer(:site, :qq_connect_enabled) { SiteSetting.qq_connect_enabled }
+add_to_serializer(:site, :qq_connect_client_id) { SiteSetting.qq_connect_client_id }
+add_to_serializer(:site, :qq_connect_client_secret) { SiteSetting.qq_connect_client_secret }
+
+# 注册认证提供者
+auth_provider title: 'with QQ',
+              enabled_setting: 'qq_connect_enabled',
               frame_width: 760,
               frame_height: 500,
+              authenticator: QQAuthenticator.new,
               background_color: '#51b7ec'
 
-# 添加设置项
-add_admin_route 'qq_connect.title', 'qq_connect'
-register_setting :qq_connect_enabled, type: :boolean, default: false
-register_setting :qq_connect_client_id, type: :string, secret: true
-register_setting :qq_connect_client_secret, type: :string, secret: true
-
-# CSS 样式
+# 添加样式
 register_css <<CSS
 .btn-social.qq_connect:before {
   font-family: "Font Awesome 5 Free";
-  content: "\f1d6";
-  font-weight: 900;
+  content: "\\f3ce";
 }
 CSS
